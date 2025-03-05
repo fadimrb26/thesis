@@ -1,28 +1,27 @@
 * Define MOSFET models
-.model PMOS PMOS VTO=-0.4 KP=100u
-.model NMOS NMOS VTO=0.4  KP=200u
+.model PMOS PMOS (VTO=-0.4 KP=100u)
+.model NMOS NMOS (VTO=0.4 KP=200u)
 .model SWMODEL SW(Ron=1 Roff=1G Von=1 Voff=0.5)
 
 * Power supply
-Vdd VDD 0 1.8V
+Vdd VDD 0 1.1V
 
-* Input voltage sweep (from 0 to Vdd)
-Vin IN 0 DC 0
+* Random noise source at input
+Vnoise IN 0 PULSE(0 1u 0n 0.1n 0.1n 10n 30n)
 
-* Latch circuit
 * Inverter 1
-M1 Q  N1 VDD VDD PMOS W=1u L=0.1u
-M2 Q  N1 GND GND NMOS W=0.5u L=0.1u
+M1 Q  N1 VDD VDD PMOS W=360n L=45n
+M2 Q  N1 0   0   NMOS W=180n L=45n
 
 * Inverter 2
-M3 Qb N2  VDD VDD PMOS W=1u L=0.1u
-M4 Qb N2  GND GND NMOS W=0.5u L=0.1u
+M3 Qb N2 VDD VDD PMOS W=360n L=45n
+M4 Qb N2 0   0   NMOS W=180n L=45n
 
 * Capacitors at the outputs
-C1 Q  0 10f  
-C2 Qb 0 10f
-C3 N1 0 10f
-C4 N2 0 10f  
+C1 Q  0 100f  
+C2 Qb 0 100f
+C3 N1 0 100f
+C4 N2 0 100f  
 
 * Switch to connect input to the latch
 S1 Qb IN CLK 0 SWMODEL
@@ -31,18 +30,11 @@ S3 Q  N2 CLK 0 SWMODEL
 S4 Q  N1 NCLK 0 SWMODEL
 S5 Qb N2 NCLK 0 SWMODEL  
 
-Vclk CLK 0 PULSE(1.8 0 0n 0.1n 0.1n 20n 30n)
-Vnclk NCLK 0 PULSE(0 1.8 0n 0.1n 0.1n 20n 30n)
+* Clock signals (CLK high for 10ns, low for 20ns)
+Vclk CLK 0 PULSE(0 1.8 0n 0.1n 0.1n 10n 30n)  
+Vnclk NCLK 0 PULSE(1.8 0 0n 0.1n 0.1n 10n 30n) 
 
 * Simulation control
-.tran 0.1n 100n
-* .dc Vin 0 1.8 0.01  
-.control
-run
-* Plot the input voltage and latch outputs
-plot V(IN) V(CLK) V(NCLK)
-plot V(Q) V(Qb)
-* wrdata LatchSweep_output.csv V(IN) V(Q) V(Qb)
-.endc
+.tran 0.1n 60n
 
 .end
