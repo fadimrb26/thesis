@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Step 1: Define the graph to embed
-G = nx.erdos_renyi_graph(8, 0.5)  # Random graph with 5 nodes and 50% edge probability
+G = nx.erdos_renyi_graph(3, 0.1)  # Random graph with 5 nodes and 50% edge probability
 
 def find_unit_edges(points):
     edges = []
@@ -14,17 +14,21 @@ def find_unit_edges(points):
             edges.append((p1, p2))
     return edges
 
-# Step 2: Find the minimum lattice size
+# Step 2: Find the minimum lattice size 
 def find_minimum_lattice_size(G):
     # Start with a 3x3 lattice
-    lattice_size = 3
+    lattice_size = 2
     while lattice_size < 20:
         print(f"Trying {lattice_size}x{lattice_size} lattice...")
         # Create the square lattice (no diagonal edges)
         square_lattice = nx.grid_2d_graph(lattice_size, lattice_size)
         
-        # Attempt to find an embedding
-        embedding = minorminer.find_embedding(G.edges(), square_lattice.edges())
+        if len(G.edges()) == 0:
+            print("Graph has no edges! Assigning nodes randomly.")
+            embedding = {node: [(np.random.randint(0, lattice_size), np.random.randint(0, lattice_size))] for node in G.nodes()}
+        else:
+            embedding = minorminer.find_embedding(G.edges(), square_lattice.edges())
+
         # Check if the embedding was successful
         if embedding:
             print(f"Embedding found with {lattice_size}x{lattice_size} lattice!")
@@ -52,7 +56,8 @@ print("Initial Edges:", G.edges())
 # Plot the original graph
 plt.figure(figsize=(10, 5))
 plt.subplot(121)
-nx.draw(G, with_labels=True, node_color='lightblue', node_size=500)
+pos_G = nx.spring_layout(G, seed=42)  # Use spring layout for better spacing
+nx.draw(G, pos_G, with_labels=True, node_color='lightblue', edge_color='gray', node_size=600, font_size=10, font_weight='bold')
 plt.title("Original Graph")
 
 # Plot the embedded graph on the square lattice
@@ -112,3 +117,4 @@ for u, v in G.edges():
                 continue  
             break  
 plt.show()
+
