@@ -1,187 +1,271 @@
-* Define MOSFET models
-.model PMOS PMOS (VTO=-0.4 KP=100u)
-.model NMOS NMOS (VTO=0.4 KP=200u)
-.model SWMODEL SW(Ron=1 Roff=1G Von=1 Voff=0.5)
+from itertools import combinations
+import os
+import networkx as nx
+import matplotlib.pyplot as plt
+import minorminer
+import numpy as np
+import pandas as pd
 
-* Define the latch subcircuit with initialization parameters
-.SUBCKT LATCH Q Qb VDD GND PARAMS: VQ_init=0 VQb_init=0
-* Inverter 1
-M1 Q  Qb VDD VDD PMOS W=360n L=45n
-M2 Q  Qb GND GND NMOS W=180n L=45n
+# Function Definitions
+def find_minimum_lattice_size(G):
+    lattice_size = 2
+    while lattice_size < 20:
+        print(f"Trying {lattice_size}x{lattice_size} lattice...")
+        square_lattice = nx.grid_2d_graph(lattice_size, lattice_size)
+        if len(G.edges()) == 0:
+            print("Graph has no edges! Assigning nodes randomly.")
+            embedding = {node: [(np.random.randint(0, lattice_size), np.random.randint(0, lattice_size))] for node in G.nodes()}
+        else:
+            embedding = minorminer.find_embedding(G.edges(), square_lattice.edges())
+            
+        if embedding:
+            print(f"Embedding found with {lattice_size}x{lattice_size} lattice!")
+            return lattice_size, square_lattice, embedding
+        lattice_size += 1
 
-* Inverter 2
-M3 Qb Q VDD VDD PMOS W=360n L=45n
-M4 Qb Q GND GND NMOS W=180n L=45n
+    print("No embedding found up to 20x20 lattice.")
+    return None, None, None
 
-* Capacitors at the outputs
-C1 Q  GND 100f  
-C2 Qb GND 100f
+def find_unit_edges(points):
+    edges = []
+    for p1, p2 in combinations(points, 2):
+        if np.linalg.norm(np.array(p1) - np.array(p2)) == 1:
+            edges.append((p1, p2))
+    return edges
 
-* Set initial conditions using parameters
-.IC V(Q)={VQ_init} V(Qb)={VQb_init}
-.ENDS LATCH
+def generate_spice_netlist(G, embedding, graph='fc'):
+    spice_code = [
+        "* CMOS Capacitive-Coupled Ising Machine",
+        ".model PMOS PMOS (VTO=-0.4 KP=100u)",
+        ".model NMOS NMOS (VTO=0.4 KP=200u)",
+        ".model SWMODEL SW(Ron=1 Roff=1G Vt=0.5 Vh=0)\n",
+        "* Define the latch subcircuit",
+        ".SUBCKT LATCH Q Qb VDD GND PARAMS: VQ_init=0 VQb_init=0",
+        "M1 Q  Qb VDD VDD PMOS W=360n L=45n",
+        "M2 Q  Qb GND GND NMOS W=180n L=45n",
+        "M3 Qb Q VDD VDD PMOS W=360n L=45n",
+        "M4 Qb Q GND GND NMOS W=180n L=45n",
+        "C1 Q  GND 100f",
+        "C2 Qb GND 100f",
+        ".IC V(Q)={VQ_init} V(Qb)={VQb_init}",
+        ".ENDS LATCH\n",
+        "* Power supply",
+        "Vdd VDD 0 1.1V\n"
+    ]
+    
+    logical_to_spice = {node: f"Q{node}" for node in G.nodes()}
 
-* Power supply
-Vdd VDD 0 1.1V
+    if graph == 'fc':
+        for node in G.nodes():
+            spice_code.append(f"X{node} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0")
+    elif graph == 'lattice':
+        for node, chain in embedding.items():
+            for qubit in chain:
+                spice_code.append(f"X{qubit[0]}{qubit[1]} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0")
 
-* Instantiate the latches
-X0 Q0 Qb0 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X1 Q4 Qb4 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X2 Q4 Qb4 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X3 Q4 Qb4 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X4 Q0 Qb0 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X5 Q3 Qb3 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X6 Q4 Qb4 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X7 Q0 Qb0 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X8 Q1 Qb1 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X9 Q4 Qb4 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X10 Q2 Qb2 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X11 Q2 Qb2 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
-X12 Q2 Qb2 VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0
+    spice_code.append("\n")
+    switch_idx = 0
+    for (u, v) in G.edges():
+        spice_code.append(f"* Connection between latch {u} and latch {v}")
+        spice_code.append(f"S{switch_idx}_{switch_idx * 4} {logical_to_spice[u]} N{switch_idx * 4} FLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}_{switch_idx * 4 + 1} {logical_to_spice[v]} N{switch_idx * 4 + 1} FLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}_{switch_idx * 4 + 2} {logical_to_spice[u]}b N{switch_idx * 4 + 2} FLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}_{switch_idx * 4 + 3} {logical_to_spice[v]}b N{switch_idx * 4 + 3} FLY_CTRL{switch_idx} 0 SWMODEL")
 
-* Connection between latch 0 and latches 1, 2, 3, and 4
-* Latch 0 to Latch 1
-S0_01 Q0 N0 FLY_CTRL0 0 SWMODEL
-S1_01 Q1 N1 FLY_CTRL0 0 SWMODEL
-S2_01 Qb0 N2 FLY_CTRL0 0 SWMODEL
-S3_01 Qb1 N3 FLY_CTRL0 0 SWMODEL
+        spice_code.append("\n")
+        
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4} {logical_to_spice[u]}b N{switch_idx * 4} NFLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 1} {logical_to_spice[v]} N{switch_idx * 4 + 1} NFLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 2} {logical_to_spice[u]} N{switch_idx * 4 + 2} NFLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 3} {logical_to_spice[v]}b N{switch_idx * 4 + 3} NFLY_CTRL{switch_idx} 0 SWMODEL")
 
-S0i_01 Qb0 N0 NFLY_CTRL0 0 SWMODEL
-S1i_01 Q1 N1 NFLY_CTRL0 0 SWMODEL
-S2i_01 Q0 N2 NFLY_CTRL0 0 SWMODEL
-S3i_01 Qb1 N3 NFLY_CTRL0 0 SWMODEL
+        spice_code.append("\n")
 
-* Latch 0 to Latch 2
-S0_02 Q0 N4 FLY_CTRL1 0 SWMODEL
-S1_02 Q2 N5 FLY_CTRL1 0 SWMODEL
-S2_02 Qb0 N6 FLY_CTRL1 0 SWMODEL
-S3_02 Qb2 N7 FLY_CTRL1 0 SWMODEL
+        spice_code.append(f"C_fly_{switch_idx * 2} N{switch_idx * 4} N{switch_idx * 4 + 1} {cap_values_femto}f")
+        spice_code.append(f"C_fly_{switch_idx * 2 + 1} N{switch_idx * 4 + 2} N{switch_idx * 4 + 3} {cap_values_femto}f")
+        spice_code.append("\n")
 
-S0i_02 Qb0 N4 NFLY_CTRL1 0 SWMODEL
-S1i_02 Q2 N5 NFLY_CTRL1 0 SWMODEL
-S2i_02 Q0 N6 NFLY_CTRL1 0 SWMODEL
-S3i_02 Qb2 N7 NFLY_CTRL1 0 SWMODEL
+        switch_idx += 1
 
-* Latch 0 to Latch 3
-S0_03 Q0 N8 FLY_CTRL2 0 SWMODEL
-S1_03 Q3 N9 FLY_CTRL2 0 SWMODEL
-S2_03 Qb0 N10 FLY_CTRL2 0 SWMODEL
-S3_03 Qb3 N11 FLY_CTRL2 0 SWMODEL
+    for i in range(switch_idx):
+        spice_code.append(f"Vfly_ctrl{i} FLY_CTRL{i} 0 DC 0")
+        spice_code.append(f"Vnfly_ctrl{i} NFLY_CTRL{i} 0 DC 1.1")
+        spice_code.append("\n")
+        
+    spice_code.append(".tran 0.1n 60n")
+    q_values = " ".join([f"V({logical_to_spice[node]})" for node in G.nodes()])
+    spice_code.append(".control")
+    spice_code.append("run")
+    spice_code.append(f"wrdata Automated{graph}Ising.csv {q_values}")
+    spice_code.append(".endc")
+    spice_code.append(".end")
+        
+    return "\n".join(spice_code)
 
-S0i_03 Qb0 N8 NFLY_CTRL2 0 SWMODEL
-S1i_03 Q3 N9 NFLY_CTRL2 0 SWMODEL
-S2i_03 Q0 N10 NFLY_CTRL2 0 SWMODEL
-S3i_03 Qb3 N11 NFLY_CTRL2 0 SWMODEL
+def run_ngspice_os_system(netlist_path, gui=True):
+    ngspice_path = r"C:\Spice64\bin\ngspice.exe"
+    
+    if not os.path.exists(netlist_path):
+        print(f"Error: Netlist not found at {netlist_path}")
+        return False
+    
+    if gui: 
+        command = f'{ngspice_path} {netlist_path}'
+    else: 
+        command = f'{ngspice_path} -b {netlist_path} 2>&1'
+    exit_code = os.system(command)
+    
+    if exit_code == 0:
+        print("✅ NGspice simulation completed successfully!")
+        return True
+    else:
+        print(f"❌ NGspice failed with exit code {exit_code}")
+        return False
 
-* Latch 0 to Latch 4
-S0_04 Q0 N12 FLY_CTRL3 0 SWMODEL
-S1_04 Q4 N13 FLY_CTRL3 0 SWMODEL
-S2_04 Qb0 N14 FLY_CTRL3 0 SWMODEL
-S3_04 Qb4 N15 FLY_CTRL3 0 SWMODEL
+import math
 
-S0i_04 Qb0 N12 NFLY_CTRL3 0 SWMODEL
-S1i_04 Q4 N13 NFLY_CTRL3 0 SWMODEL
-S2i_04 Q0 N14 NFLY_CTRL3 0 SWMODEL
-S3i_04 Qb4 N15 NFLY_CTRL3 0 SWMODEL
+def plot_node_comparisons():
+    """Automatically create comparison plots for all nodes in a grid layout."""
+    try:
+        # Read both CSV files
+        df_fc = pd.read_csv("AutomatedFCIsing.csv", delim_whitespace=True, header=None)
+        df_lattice = pd.read_csv("AutomatedLatticeIsing.csv", delim_whitespace=True, header=None)
+        
+        # Get voltage data (every second column starting from index 1)
+        voltages_fc = df_fc.iloc[:, 1::2]
+        voltages_lattice = df_lattice.iloc[:, 1::2]
+        time_fc = df_fc.iloc[:, 0]
+        time_lattice = df_lattice.iloc[:, 0]
+        
+        num_nodes = min(voltages_fc.shape[1], voltages_lattice.shape[1])
+        
+        # Calculate grid dimensions (square-ish layout)
+        cols = math.ceil(math.sqrt(num_nodes))
+        rows = math.ceil(num_nodes / cols)
+        
+        # Create figure
+        fig, axs = plt.subplots(rows, cols, figsize=(cols*4, rows*3))
+        fig.suptitle('Node Voltage Comparisons (FC vs Lattice)', fontsize=12, y=1)
+        
+        # Flatten axes array for easy iteration
+        if num_nodes > 1:
+            axs = axs.flatten()
+        else:
+            axs = [axs]  # Make it iterable for single node case
+        
+        # Plot each node comparison
+        for i in range(num_nodes):
+            ax = axs[i]
+            ax.plot(time_fc, voltages_fc.iloc[:,i], label='FC')
+            ax.plot(time_lattice, voltages_lattice.iloc[:,i], label='Lattice')
+            ax.set_title(f'Node Q{i+1}')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Voltage (V)')
+            ax.grid(True)
+            ax.legend()
+        
+        # Hide unused subplots
+        for j in range(num_nodes, len(axs)):
+            axs[j].axis('off')
+        
+        plt.tight_layout()
+        plt.show()
+        
+    except Exception as e:
+        print(f"Error plotting results: {str(e)}")
+# Main Execution
+if __name__ == "__main__":
+    # Parameters
+    num_nodes = 5
+    sparsity = 0.5
+    cap_values_femto = 10
+    
+    # Create graph
+    G = nx.erdos_renyi_graph(num_nodes, sparsity)
+    
+    # Find embedding
+    lattice_size, square_lattice, embedding = find_minimum_lattice_size(G)
+    
+    # Generate netlists
+    lattice_netlist = generate_spice_netlist(G, embedding, graph='fc')
+    with open(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedFCIsing.cir", "w") as f:
+        f.write(lattice_netlist)
+    print("SPICE netlist generated: AutomatedFCIsing.cir")
 
-* Connection between latch 1 and latches 2, 3, and 4
-* Latch 1 to Latch 2
-S0_12 Q1 N16 FLY_CTRL4 0 SWMODEL
-S1_12 Q2 N17 FLY_CTRL4 0 SWMODEL
-S2_12 Qb1 N18 FLY_CTRL4 0 SWMODEL
-S3_12 Qb2 N19 FLY_CTRL4 0 SWMODEL
+    lattice_netlist = generate_spice_netlist(G, embedding, graph='lattice')
+    with open(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedLatticeIsing.cir", "w") as f:
+        f.write(lattice_netlist)
+    print("SPICE netlist generated: AutomatedLatticeIsing.cir")
 
-S0i_12 Qb1 N16 NFLY_CTRL4 0 SWMODEL
-S1i_12 Q2 N17 NFLY_CTRL4 0 SWMODEL
-S2i_12 Q1 N18 NFLY_CTRL4 0 SWMODEL
-S3i_12 Qb2 N19 NFLY_CTRL4 0 SWMODEL
+    # Analysis
+    physical_spins = set()
+    for chain in embedding.values():
+        physical_spins.update(chain)
+    num_spins = len(physical_spins)
 
-* Latch 1 to Latch 3
-S0_13 Q1 N20 FLY_CTRL5 0 SWMODEL
-S1_13 Q3 N21 FLY_CTRL5 0 SWMODEL
-S2_13 Qb1 N22 FLY_CTRL5 0 SWMODEL
-S3_13 Qb3 N23 FLY_CTRL5 0 SWMODEL
+    print("Minimum lattice size:", lattice_size, "x", lattice_size)
+    print("Number of physical spins used:", num_spins)
+    print("Embedding:", embedding)
+    print("Initial Edges:", G.edges())
 
-S0i_13 Qb1 N20 NFLY_CTRL5 0 SWMODEL
-S1i_13 Q3 N21 NFLY_CTRL5 0 SWMODEL
-S2i_13 Q1 N22 NFLY_CTRL5 0 SWMODEL
-S3i_13 Qb3 N23 NFLY_CTRL5 0 SWMODEL
+    # Visualization
+    plt.figure(figsize=(10, 5))
+    plt.subplot(121)
+    pos_G = nx.spring_layout(G, seed=42)
+    nx.draw(G, pos_G, with_labels=True, node_color='lightblue', edge_color='gray', node_size=600, font_size=10, font_weight='bold')
+    plt.title("Original Graph")
 
-* Latch 1 to Latch 4
-S0_14 Q1 N24 FLY_CTRL6 0 SWMODEL
-S1_14 Q4 N25 FLY_CTRL6 0 SWMODEL
-S2_14 Qb1 N26 FLY_CTRL6 0 SWMODEL
-S3_14 Qb4 N27 FLY_CTRL6 0 SWMODEL
+    plt.subplot(122)
+    pos = {(x, y): (x, y) for x, y in square_lattice.nodes()}
+    nx.draw(square_lattice, pos, node_size=100, node_color='lightgray', with_labels=True)
 
-S0i_14 Qb1 N24 NFLY_CTRL6 0 SWMODEL
-S1i_14 Q4 N25 NFLY_CTRL6 0 SWMODEL
-S2i_14 Q1 N26 NFLY_CTRL6 0 SWMODEL
-S3i_14 Qb4 N27 NFLY_CTRL6 0 SWMODEL
+    for node, chain in embedding.items():
+        for qubit in chain:
+            nx.draw_networkx_nodes(square_lattice, pos, nodelist=[qubit], node_color='red', node_size=200)
+        for edge in find_unit_edges(chain):
+            nx.draw_networkx_edges(square_lattice, pos, edgelist=[edge], edge_color='blue', width=2)
 
-* Latch 2 to Latch 4
-S0_24 Q2 N32 FLY_CTRL8 0 SWMODEL
-S1_24 Q4 N33 FLY_CTRL8 0 SWMODEL
-S2_24 Qb2 N34 FLY_CTRL8 0 SWMODEL
-S3_24 Qb4 N35 FLY_CTRL8 0 SWMODEL
+    for node, chain in embedding.items():
+        for qubit in chain:
+            plt.text(
+                pos[qubit][0], pos[qubit][1] + 0.1,
+                f"{node}",
+                horizontalalignment='center',
+                color='black',
+                fontsize=12,
+                bbox=dict(facecolor='white', edgecolor='none', alpha=0.8))
+    plt.title(f"Embedded Graph on {lattice_size}x{lattice_size} Lattice\n"
+              f"Initial Edges in Red, Chains in Blue")
 
-S0i_24 Qb2 N32 NFLY_CTRL8 0 SWMODEL
-S1i_24 Q4 N33 NFLY_CTRL8 0 SWMODEL
-S2i_24 Q2 N34 NFLY_CTRL8 0 SWMODEL
-S3i_24 Qb4 N35 NFLY_CTRL8 0 SWMODEL
-* Flying capacitors
-C_fly_0 N0 N1 20f
-C_fly_1 N2 N3 20f
-C_fly_2 N4 N5 20f
-C_fly_3 N6 N7 20f
+    for u, v in G.edges():
+        chain_u = embedding[u]
+        chain_v = embedding[v]
+        qubit_u = chain_u[-1]
+        qubit_v = chain_v[-1]
+        if (qubit_u[0] == qubit_v[0] and abs(qubit_u[1]-qubit_v[1]) == 1) or (qubit_u[1] == qubit_v[1] and abs(qubit_u[0]-qubit_v[0]) == 1):
+            nx.draw_networkx_edges(
+                square_lattice, pos,
+                edgelist=[(qubit_u, qubit_v)],
+                edge_color='red',
+                width=2
+            )
+        else:
+            for i_qubit in chain_u[::-1]:
+                for j_qubit in chain_v[::-1]:
+                    if (i_qubit[0] == j_qubit[0] and abs(i_qubit[1]-j_qubit[1]) == 1) or (i_qubit[1] == j_qubit[1] and abs(i_qubit[0]-j_qubit[0]) == 1):
+                        nx.draw_networkx_edges(
+                            square_lattice, pos,
+                            edgelist=[(i_qubit, j_qubit)],
+                            edge_color='red',
+                            width=2
+                        )
+                        break 
+                else:
+                    continue  
+                break  
+    plt.show()
 
-C_fly_4 N8 N9 20f
-C_fly_5 N10 N11 20f
-
-C_fly_6 N12 N13 20f
-C_fly_7 N14 N15 20f
-
-C_fly_8 N16 N17 20f
-C_fly_9 N18 N19 20f
-
-C_fly_10 N20 N21 20f
-C_fly_11 N22 N23 20f
-
-C_fly_12 N24 N25 20f
-C_fly_13 N26 N27 20f 
-
-C_fly_14 N28 N29 20f
-C_fly_15 N30 N31 20f
-
-C_fly_16 N32 N33 20f
-C_fly_17 N34 N35 20f
-* Control signals for flying capacitors
-Vfly_ctrl0 FLY_CTRL0 0 DC 0
-Vnfly_ctrl0 NFLY_CTRL0 0 DC 1.1
-
-Vfly_ctrl1 FLY_CTRL1 0 DC 0
-Vnfly_ctrl1 NFLY_CTRL1 0 DC 1.1
-
-Vfly_ctrl2 FLY_CTRL2 0 DC 0
-Vnfly_ctrl2 NFLY_CTRL2 0 DC 1.1
-
-Vfly_ctrl3 FLY_CTRL3 0 DC 0
-Vnfly_ctrl3 NFLY_CTRL3 0 DC 1.1
-
-Vfly_ctrl4 FLY_CTRL4 0 DC 0
-Vnfly_ctrl4 NFLY_CTRL4 0 DC 1.1
-
-Vfly_ctrl5 FLY_CTRL5 0 DC 0
-Vnfly_ctrl5 NFLY_CTRL5 0 DC 1.1
-
-Vfly_ctrl6 FLY_CTRL6 0 DC 0
-Vnfly_ctrl6 NFLY_CTRL6 0 DC 1.1
-
-Vfly_ctrl7 FLY_CTRL7 0 DC 0
-Vnfly_ctrl7 NFLY_CTRL7 0 DC 1.1
-
-Vfly_ctrl8 FLY_CTRL8 0 DC 0
-Vnfly_ctrl8 NFLY_CTRL8 0 DC 1.1
-* Simulation control
-.tran 0.1n 120n
-
-.end
+    # Run simulations
+    run_ngspice_os_system(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedFCIsing.cir", gui=False)
+    run_ngspice_os_system(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedLatticeIsing.cir", gui=False)
+    plot_node_comparisons()
