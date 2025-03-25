@@ -1,16 +1,13 @@
 from itertools import combinations
+import os
+import math
 import networkx as nx
 import matplotlib.pyplot as plt
 import minorminer
 import numpy as np
+import pandas as pd
 
-# Step 1: Define the fully connected graph
-num_nodes = 5  # Number of nodes
-sparsity = 0.5  # Sparsity of the graph
-cap_values_femto = 20 # Edge capacitance value in femtofarads
-G = nx.erdos_renyi_graph(num_nodes, sparsity)
-
-# Step 2: Find minimum 2D lattice size for embedding
+# Function Definitions
 def find_minimum_lattice_size(G):
     lattice_size = 2
     while lattice_size < 20:
@@ -32,18 +29,17 @@ def find_minimum_lattice_size(G):
 
 def find_unit_edges(points):
     edges = []
-    for p1, p2 in combinations(points, 2):  # Check all pairs of points
+    for p1, p2 in combinations(points, 2):
         if np.linalg.norm(np.array(p1) - np.array(p2)) == 1:
             edges.append((p1, p2))
     return edges
 
-# Step 4: Generate SPICE Netlist
-def generate_spice_netlist(G):
+def generate_spice_netlist(G, embedding, graph='fc'):
     spice_code = [
         "* CMOS Capacitive-Coupled Ising Machine",
         ".model PMOS PMOS (VTO=-0.4 KP=100u)",
         ".model NMOS NMOS (VTO=0.4 KP=200u)",
-        ".model SWMODEL SW(Ron=1 Roff=1G Von=1 Voff=0.5)\n",
+        ".model SWMODEL SW(Ron=1 Roff=1G Vt=0.5 Vh=0)\n",
         "* Define the latch subcircuit",
         ".SUBCKT LATCH Q Qb VDD GND PARAMS: VQ_init=0 VQb_init=0",
         "M1 Q  Qb VDD VDD PMOS W=360n L=45n",
@@ -57,15 +53,18 @@ def generate_spice_netlist(G):
         "* Power supply",
         "Vdd VDD 0 1.1V\n"
     ]
-
-    # Map logical nodes to SPICE node names
+    
     logical_to_spice = {node: f"Q{node}" for node in G.nodes()}
 
-    # Add latch instances
-    for node in G.nodes():
-        spice_code.append(f"X{node} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0")
+    if graph == 'fc':
+        for node in G.nodes():
+            spice_code.append(f"X{node} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0")
+    elif graph == 'lattice':
+        for node, chain in embedding.items():
+            for qubit in chain:
+                spice_code.append(f"X{qubit[0]}{qubit[1]} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0")
 
-    # Add switch connections based on the graph edges
+    spice_code.append("\n")
     switch_idx = 0
     for (u, v) in G.edges():
         spice_code.append(f"* Connection between latch {u} and latch {v}")
@@ -74,40 +73,189 @@ def generate_spice_netlist(G):
         spice_code.append(f"S{switch_idx}_{switch_idx * 4 + 2} {logical_to_spice[u]}b N{switch_idx * 4 + 2} FLY_CTRL{switch_idx} 0 SWMODEL")
         spice_code.append(f"S{switch_idx}_{switch_idx * 4 + 3} {logical_to_spice[v]}b N{switch_idx * 4 + 3} FLY_CTRL{switch_idx} 0 SWMODEL")
 
-        spice_code.append(f"S{switch_idx}i_{switch_idx * 4} {logical_to_spice[u]}b N{switch_idx * 4} FLY_CTRL{switch_idx} 0 SWMODEL")
-        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 1} {logical_to_spice[v]} N{switch_idx * 4 + 1} FLY_CTRL{switch_idx} 0 SWMODEL")
-        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 2} {logical_to_spice[u]} N{switch_idx * 4 + 2} FLY_CTRL{switch_idx} 0 SWMODEL")
-        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 3} {logical_to_spice[v]}b N{switch_idx * 4 + 3} FLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append("\n")
+        
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4} {logical_to_spice[u]}b N{switch_idx * 4} NFLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 1} {logical_to_spice[v]} N{switch_idx * 4 + 1} NFLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 2} {logical_to_spice[u]} N{switch_idx * 4 + 2} NFLY_CTRL{switch_idx} 0 SWMODEL")
+        spice_code.append(f"S{switch_idx}i_{switch_idx * 4 + 3} {logical_to_spice[v]}b N{switch_idx * 4 + 3} NFLY_CTRL{switch_idx} 0 SWMODEL")
+
+        spice_code.append("\n")
+
+        spice_code.append(f"C_fly_{switch_idx * 2} N{switch_idx * 4} N{switch_idx * 4 + 1} {cap_values_femto}f")
+        spice_code.append(f"C_fly_{switch_idx * 2 + 1} N{switch_idx * 4 + 2} N{switch_idx * 4 + 3} {cap_values_femto}f")
+        spice_code.append("\n")
 
         switch_idx += 1
 
-    # Add flying capacitors
-    for i in range(switch_idx):
-        spice_code.append(f"C_fly_{i} N{i * 4} N{i * 4 + 1} {cap_values_femto}f")
-        spice_code.append(f"C_fly_{i+1} N{i * 4 + 2} N{i * 4 + 3} {cap_values_femto}f")
-
-    # Add control signals for switches
     for i in range(switch_idx):
         spice_code.append(f"Vfly_ctrl{i} FLY_CTRL{i} 0 DC 0")
         spice_code.append(f"Vnfly_ctrl{i} NFLY_CTRL{i} 0 DC 1.1")
-
-    # Add simulation control
+        spice_code.append("\n")
+        
     spice_code.append(".tran 0.1n 60n")
+    q_values = " ".join([f"V({logical_to_spice[node]})" for node in G.nodes()])
+    spice_code.append(".control")
+    spice_code.append("run")
+    spice_code.append(f"wrdata Automated{graph}Ising.csv {q_values}")
+    spice_code.append(".endc")
     spice_code.append(".end")
-
+        
     return "\n".join(spice_code)
 
-# Find the minimum lattice size and embedding
+def run_ngspice_os_system(netlist_path, gui=True):
+    ngspice_path = r"C:\Spice64\bin\ngspice.exe"
+    
+    if not os.path.exists(netlist_path):
+        print(f"Error: Netlist not found at {netlist_path}")
+        return False
+    
+    if gui: 
+        command = f'{ngspice_path} {netlist_path}'
+    else: 
+        command = f'{ngspice_path} -b {netlist_path} 2>&1'
+    exit_code = os.system(command)
+    
+    if exit_code == 0:
+        print("✅ NGspice simulation completed successfully!")
+        return True
+    else:
+        print(f"❌ NGspice failed with exit code {exit_code}")
+        return False
+
+def solve_ising_problem(G):
+    cut_value, partition = nx.algorithms.approximation.maxcut.one_exchange(G)
+    # print("NetworkX Output:")
+    # print("  - Approximate MaxCut value:", cut_value)
+    # print("  - Partition (S, T):", partition)
+
+    # Step 2: Convert partition to Ising spins {-1, +1}
+    ising_spins = {}
+    for node in G.nodes():
+        ising_spins[node] = -1 if node in partition[0] else +1  # S: -1, T: +1
+    # print("\nIsing Spin Assignment:")
+    # print("  -", ising_spins)
+
+    # Step 3: Calculate Hamiltonian (energy) for MaxCut in Ising form
+    hamiltonian = 0
+    for (i, j) in G.edges():
+        hamiltonian += -1 * ising_spins[i] * ising_spins[j]  # J_{ij} = -1 for all edges
+    return hamiltonian
+    # print("\nHamiltonian (Energy):")
+    # print("  - H =", hamiltonian)
+    # print("  - Note: For MaxCut, the Hamiltonian is minimized (ground state = -MaxCut).")
+    # print("  - MaxCut value =", -hamiltonian)  # Since H = -∑ s_i s_j 
+    
+def compute_hamiltonian(solution, edges):
+    """
+    Computes the Ising Hamiltonian using the first recorded spin values after time exceeds 40 ns.
+
+    Parameters:
+    - solution: Path to the CSV file containing time and voltage data.
+    - edges: List of tuples representing connections between nodes.
+
+    Returns:
+    - Hamiltonian value (energy) computed as H = -∑ J_ij * s_i * s_j with J_ij = -1.
+    """
+    # Read CSV file (assuming whitespace delimiter, no headers)
+    df = pd.read_csv(solution, sep='\s+', header=None, skipinitialspace=True)
+    
+    # Extract time column (every third column starting from index 0)
+    time_col = df.iloc[:, ::2]
+    
+    # Extract voltage columns (every second column starting from index 1)
+    voltage_cols = df.iloc[:, 1::2]
+
+    # Find the first row where time exceeds 40 ns
+    mask = time_col.iloc[:, 0] > 40e-9  # Convert ns to seconds
+    first_index = mask.idxmax()  # Get first occurrence of True
+
+    # Extract first Q voltages after 40ns
+    first_voltages = voltage_cols.iloc[first_index, :]
+
+    # Convert voltages to spins: 0V → -1, 1.1V → +1
+    spins = first_voltages.apply(lambda v: 1 if v > 0.55 else -1).tolist()
+
+    # Compute Hamiltonian using H = -∑ s_i * s_j
+    H = -sum(spins[i] * spins[j] for i, j in edges)
+
+    return H
+
+def plot_node_comparisons(num_nodes):
+    """Automatically create comparison plots for all nodes in a grid layout, including OpenJIJ results."""
+    try:
+        # Read both CSV files
+        df_fc = pd.read_csv("AutomatedFCIsing.csv", sep='\s+', header=None, skipinitialspace=True)
+        df_lattice = pd.read_csv("AutomatedLatticeIsing.csv", sep='\s+', header=None, skipinitialspace=True)
+        
+        # Get voltage data (every second column starting from index 1)
+        voltages_fc = df_fc.iloc[:, 1::2]
+        voltages_lattice = df_lattice.iloc[:, 1::2]
+        time_fc = df_fc.iloc[:, 0]
+        time_lattice = df_lattice.iloc[:, 0]
+        
+        # Calculate grid dimensions (square-ish layout)
+        cols = math.ceil(math.sqrt(num_nodes))
+        rows = math.ceil(num_nodes / cols)
+        
+        # Create figure
+        fig, axs = plt.subplots(rows, cols, figsize=(cols*4, rows*3))
+        fig.suptitle('Node Voltage Comparisons (FC vs Lattice vs OpenJIJ)', fontsize=12, y=1)
+        
+        # Flatten axes array for easy iteration
+        if num_nodes > 1:
+            axs = axs.flatten()
+        else:
+            axs = [axs]  # Make it iterable for single node case
+        
+        # Plot each node comparison
+        for i in range(num_nodes):
+            ax = axs[i]
+            ax.plot(time_fc, voltages_fc.iloc[:, i], label='FC')
+            ax.plot(time_lattice, voltages_lattice.iloc[:, i], label='Lattice')
+            
+            # # Add OpenJIJ results as a horizontal line (assuming ±1 Ising values map to voltage)
+            # openjij_voltage = best_sample[i]  # OpenJIJ spin value (-1 or 1)
+            # ax.axhline(y=openjij_voltage, color='red', linestyle='--', label='OpenJIJ')
+            
+            ax.set_title(f'Node Q{i+1}')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Voltage (V)')
+            ax.grid(True)
+            ax.legend()
+        
+        # Hide unused subplots
+        for j in range(num_nodes, len(axs)):
+            axs[j].axis('off')
+        
+        plt.tight_layout()
+        
+    except Exception as e:
+        print(f"Error plotting results: {str(e)}")
+# Main Execution 
+# Parameters
+num_nodes = 4
+sparsity = 1
+cap_values_femto = 5
+
+# Create graph
+G = nx.erdos_renyi_graph(num_nodes, sparsity)
+
+# Find embedding
 lattice_size, square_lattice, embedding = find_minimum_lattice_size(G)
 
-# Generate and save the SPICE netlist
-spice_netlist = generate_spice_netlist(G)
+# Generate netlists
+lattice_netlist = generate_spice_netlist(G, embedding, graph='fc')
 with open(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedFCIsing.cir", "w") as f:
-    f.write(spice_netlist)
-
+    f.write(lattice_netlist)
 print("SPICE netlist generated: AutomatedFCIsing.cir")
 
-# Step 3: Count the number of physical spins used
+lattice_netlist = generate_spice_netlist(G, embedding, graph='lattice')
+with open(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedLatticeIsing.cir", "w") as f:
+    f.write(lattice_netlist)
+print("SPICE netlist generated: AutomatedLatticeIsing.cir")
+
+# Analysis
 physical_spins = set()
 for chain in embedding.values():
     physical_spins.update(chain)
@@ -118,48 +266,40 @@ print("Number of physical spins used:", num_spins)
 print("Embedding:", embedding)
 print("Initial Edges:", G.edges())
 
-# Step 4: Visualize the embedding
-# Plot the original graph
+# Visualization
 plt.figure(figsize=(10, 5))
 plt.subplot(121)
-pos_G = nx.spring_layout(G, seed=42)  # Use spring layout for better spacing
+pos_G = nx.spring_layout(G, seed=42)
 nx.draw(G, pos_G, with_labels=True, node_color='lightblue', edge_color='gray', node_size=600, font_size=10, font_weight='bold')
 plt.title("Original Graph")
 
-# Plot the embedded graph on the square lattice
 plt.subplot(122)
-pos = {(x, y): (x, y) for x, y in square_lattice.nodes()}  # Position nodes in a grid
+pos = {(x, y): (x, y) for x, y in square_lattice.nodes()}
 nx.draw(square_lattice, pos, node_size=100, node_color='lightgray', with_labels=True)
 
-# Draw the chains (direct couplings) in blue
 for node, chain in embedding.items():
     for qubit in chain:
         nx.draw_networkx_nodes(square_lattice, pos, nodelist=[qubit], node_color='red', node_size=200)
     for edge in find_unit_edges(chain):
         nx.draw_networkx_edges(square_lattice, pos, edgelist=[edge], edge_color='blue', width=2)
 
-# Add labels to show which nodes in the lattice correspond to which nodes in the original graph
 for node, chain in embedding.items():
     for qubit in chain:
         plt.text(
-            pos[qubit][0], pos[qubit][1] + 0.1,  # Offset the label slightly above the node
-            f"{node}",                          # Label with the original graph node
+            pos[qubit][0], pos[qubit][1] + 0.1,
+            f"{node}",
             horizontalalignment='center',
             color='black',
             fontsize=12,
             bbox=dict(facecolor='white', edgecolor='none', alpha=0.8))
 plt.title(f"Embedded Graph on {lattice_size}x{lattice_size} Lattice\n"
-          f"Initial Edges in Red, Chains in Blue")
+            f"Initial Edges in Red, Chains in Blue")
 
-# Draw the initial edges of the original graph in red on the lattice plot
 for u, v in G.edges():
-    # Get the chains for nodes u and v from the embedding
     chain_u = embedding[u]
     chain_v = embedding[v]
-    # Draw edges between the first qubit of chain_u and the first qubit of chain_v
     qubit_u = chain_u[-1]
     qubit_v = chain_v[-1]
-    # Check if the edge is horizontal, vertical, or diagonal
     if (qubit_u[0] == qubit_v[0] and abs(qubit_u[1]-qubit_v[1]) == 1) or (qubit_u[1] == qubit_v[1] and abs(qubit_u[0]-qubit_v[0]) == 1):
         nx.draw_networkx_edges(
             square_lattice, pos,
@@ -168,7 +308,6 @@ for u, v in G.edges():
             width=2
         )
     else:
-        # Check if there is another node in the chain that can form a straight connection
         for i_qubit in chain_u[::-1]:
             for j_qubit in chain_v[::-1]:
                 if (i_qubit[0] == j_qubit[0] and abs(i_qubit[1]-j_qubit[1]) == 1) or (i_qubit[1] == j_qubit[1] and abs(i_qubit[0]-j_qubit[0]) == 1):
@@ -182,4 +321,17 @@ for u, v in G.edges():
             else:
                 continue  
             break  
+
+# Run simulations
+run_ngspice_os_system(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedFCIsing.cir", gui=False)
+run_ngspice_os_system(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheby_G1\ngspice_interface\files\input_netlists\AutomatedLatticeIsing.cir", gui=False)
+H_bm = solve_ising_problem(G)
+plot_node_comparisons(num_nodes)
+H_fc = compute_hamiltonian("AutomatedFCIsing.csv", G.edges())
+print("Hamiltonian (FC):", H_fc)
+print("Hamiltonian (OpenJIJ):", H_bm)
+if H_fc == H_bm:
+    print("✅ FC Hamiltonian matches benchmark results!")
+else:
+    print("❌ FC Hamiltonian does not match benchmark results.")
 plt.show()
