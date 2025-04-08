@@ -58,11 +58,11 @@ def generate_spice_netlist(G, embedding, graph='fc'):
 
     if graph == 'fc':
         for node in G.nodes():
-            spice_code.append(f"X{node} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0")
+            spice_code.append(f"X{node} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0V VQb_init=0V")
     elif graph == 'lattice':
         for node, chain in embedding.items():
             for qubit in chain:
-                spice_code.append(f"X{qubit[0]}{qubit[1]} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0 VQb_init=0")
+                spice_code.append(f"X{qubit[0]}{qubit[1]} {logical_to_spice[node]} {logical_to_spice[node]}b VDD 0 LATCH PARAMS: VQ_init=0V VQb_init=0V")
 
     spice_code.append("\n")
     switch_idx = 0
@@ -93,7 +93,7 @@ def generate_spice_netlist(G, embedding, graph='fc'):
         spice_code.append(f"Vnfly_ctrl{i} NFLY_CTRL{i} 0 DC 1.1")
         spice_code.append("\n")
         
-    spice_code.append(".tran 0.1n 60n")
+    spice_code.append(".tran 0.01n 60n")
     q_values = " ".join([f"V({logical_to_spice[node]})" for node in G.nodes()])
     spice_code.append(".control")
     spice_code.append("run")
@@ -200,7 +200,7 @@ def plot_node_comparisons(num_nodes):
         
         # Create figure
         fig, axs = plt.subplots(rows, cols, figsize=(cols*4, rows*3))
-        fig.suptitle('Node Voltage Comparisons (FC vs Lattice vs OpenJIJ)', fontsize=12, y=1)
+        fig.suptitle('Node Voltage Comparisons (FC vs Lattice)', fontsize=12, y=1)
         
         # Flatten axes array for easy iteration
         if num_nodes > 1:
@@ -211,8 +211,8 @@ def plot_node_comparisons(num_nodes):
         # Plot each node comparison
         for i in range(num_nodes):
             ax = axs[i]
-            ax.plot(time_fc, voltages_fc.iloc[:, i], label='FC')
-            ax.plot(time_lattice, voltages_lattice.iloc[:, i], label='Lattice')
+            ax.plot(time_fc, voltages_fc.iloc[:, i], color="blue", label='FC')
+            ax.plot(time_lattice, voltages_lattice.iloc[:, i], color="red", label='Lattice')
             
             # # Add OpenJIJ results as a horizontal line (assuming ±1 Ising values map to voltage)
             # openjij_voltage = best_sample[i]  # OpenJIJ spin value (-1 or 1)
@@ -234,9 +234,9 @@ def plot_node_comparisons(num_nodes):
         print(f"Error plotting results: {str(e)}")
 # Main Execution 
 # Parameters
-num_nodes = 4
-sparsity = 1
-cap_values_femto = 5
+num_nodes = 13
+sparsity = 0.25
+cap_values_femto = 10
 
 # Create graph
 G = nx.erdos_renyi_graph(num_nodes, sparsity)
@@ -328,10 +328,17 @@ run_ngspice_os_system(r"C:\Users\User\Downloads\CAD_IC_PROJECT\r0969864_ElMerheb
 H_bm = solve_ising_problem(G)
 plot_node_comparisons(num_nodes)
 H_fc = compute_hamiltonian("AutomatedFCIsing.csv", G.edges())
+H_lattice = compute_hamiltonian("AutomatedLatticeIsing.csv", G.edges())
 print("Hamiltonian (FC):", H_fc)
-print("Hamiltonian (OpenJIJ):", H_bm)
+print("Hamiltonian (Lattice):", H_lattice)
+print("Hamiltonian (Benchmark):", H_bm)
 if H_fc == H_bm:
     print("✅ FC Hamiltonian matches benchmark results!")
 else:
     print("❌ FC Hamiltonian does not match benchmark results.")
+
+if H_lattice == H_bm:
+    print("✅ Lattice Hamiltonian matches benchmark results!")
+else:
+    print("❌ Lattice Hamiltonian does not match benchmark results.")
 plt.show()
